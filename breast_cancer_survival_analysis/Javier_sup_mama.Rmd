@@ -1,0 +1,645 @@
+---
+title: "Tarea 3"
+author: "Javier Méndez"
+date: "`r Sys.Date()`"
+output: 
+  pdf_document:
+    number_sections: true
+    toc: true
+    toc_depth: 3
+fontsize: 12pt
+geometry: a4paper
+lang: "es"
+---
+
+```{r lectura-preprocesamiento, echo=TRUE, message=FALSE, warning=FALSE}
+# Cargar librerías necesarias
+library(readxl)
+library(dplyr)
+library(lubridate)
+library(janitor)
+
+
+# Leer el archivo Excel
+data <- read_excel("Javier_sup_mama.xlsx", sheet = "Datos")  %>%
+  clean_names()%>%
+   mutate(
+    fecha_estado_del_ultimo_control_julio = as.Date(as.numeric(fecha_estado_del_ultimo_control_julio), 
+                                                    origin = "1899-12-30"),
+    fecha_recidiva_julio = as.Date(as.numeric(fecha_recidiva_julio), origin = "1899-12-30")
+  )%>%
+  mutate(
+    tsg = round(as.numeric(difftime(fecha_estado_del_ultimo_control_julio, 
+                                    dateof_daignosis, units = "days")) / 365.25, 2)
+  )%>%
+  filter(!is.na(tsg) & tsg >= 0) # Eliminar filas con fechas inconsistentes o tiempo negativo
+
+data <- data %>%
+  filter(estado_del_ultimo_control_julio != "NA") %>% # Eliminar filas con "NA" como texto
+  mutate(
+    SG = case_when(
+      startsWith(estado_del_ultimo_control_julio, "V") ~ 0, # Vivo
+      startsWith(estado_del_ultimo_control_julio, "M") ~ 1  # Fallecido
+    )
+  )
+
+data <- data %>%
+  mutate(across(everything(), ~ifelse(as.character(.) == "NA", NA, .)))
+
+# Calcular el porcentaje de valores faltantes por columna
+porcentaje_na <- colMeans(is.na(data)) * 100
+
+
+# Eliminar columnas con 20% o más de valores faltantes
+data <- data[, porcentaje_na < 20]
+
+columnas_fecha <- c("dateof_daignosis", "fecha_estado_del_ultimo_control_julio", "dateof_surgery")
+data <- data %>% select(-all_of(columnas_fecha))
+
+data <- data %>%
+  mutate(
+    mammographic_tumor_size = as.numeric(mammographic_tumor_size),
+    ki67 = as.numeric(ki67),
+    final_tumor_size = as.numeric(final_tumor_size),
+    lymph_nodes_resected = as.numeric(lymph_nodes_resected)
+  )
+
+numeric_cols <- data %>%
+select(where(is.numeric)) %>%
+  select(-c(SG,tsg)) %>%
+  names()
+
+# Crear versiones categorizadas de las columnas numéricas
+data <- data %>%
+  mutate(
+    patientage_cat = cut(patient_age, breaks = c(0, 40, 50, 60, 70, 100), 
+                         labels = c("<=40", "41-50", "51-60", "61-70", ">70")),
+    positive_lymph_nodes_cat = cut(positive_lymph_nodes, breaks = c(-1, 0, 3, 6, Inf), 
+                                   labels = c("0", "1-3", "4-6", ">6")),
+    ror_cat = cut(ror, breaks = c(0, 20, 40, 60, 80, 100),
+                  labels = c("Low", "Moderate", "High", "Very High", "Extreme")),
+    mammographic_tumor_size_cat = cut(mammographic_tumor_size, 
+                                      breaks = c(-1, 2, 5, 10, Inf), 
+                                      labels = c("<=2 cm", "2-5 cm", "5-10 cm", ">10 cm")),
+    ki67_cat = cut(ki67, 
+                   breaks = c(-1, 10, 20, 50, 100), 
+                   labels = c("<=10", "11-20", "21-50", ">50")),
+    final_tumor_size_cat = cut(final_tumor_size, 
+                               breaks = c(-1, 2, 5, 10, Inf), 
+                               labels = c("<=2 cm", "2-5 cm", "5-10 cm", ">10 cm")),
+    lymph_nodes_resected_cat = cut(lymph_nodes_resected, 
+                                   breaks = c(-1, 5, 10, 20, Inf), 
+                                   labels = c("<=5", "6-10", "11-20", ">20"))
+  
+  )
+
+
+
+# Eliminar columnas originales numéricas
+data <- data %>%
+  select(-all_of(numeric_cols))
+
+
+
+
+# Transformar variables según lo solicitado
+data <- data %>%
+  # menopausal_status: todo lo que no sea PRE-PERIMENOPAUSAL es POSTMENOPAUSAL
+  mutate(menopausal_status = ifelse(menopausal_status == "PRE-PERIMENOPAUSAL", 
+                                    "PRE-PERIMENOPAUSAL", "POSTMENOPAUSAL")) %>%
+  
+  # er, pr, her2: transformar "p" en "P" (y valores similares)
+  mutate(
+    er = ifelse(tolower(er) == "p", "P", er),
+    pr = ifelse(tolower(pr) == "p", "P", pr)
+    
+  ) %>%
+  
+  # typeof_surgery: todo lo que no sea CONSERVATIVE es RADICAL
+  mutate(typeof_surgery = ifelse(typeof_surgery == "CONSERVATIVE", 
+                                 "CONSERVATIVE", "RADICAL")) %>%
+  
+  # adjuvant_radiotherapy: todo lo distinto de NO es SI
+  mutate(adjuvant_radiotherapy = case_when(
+    is.na(adjuvant_radiotherapy) ~ NA_character_,
+    adjuvant_radiotherapy == "NO" ~ "NO",
+    TRUE ~ "SI"
+  )) %>%
+  
+  # recidiva: "No" -> "NO" y "si"/"Si" -> "SI"
+  mutate(recidiva = case_when(
+    recidiva %in% c("No", "NO") ~ "NO",
+    recidiva %in% c("Si", "si") ~ "SI",
+    TRUE ~ recidiva
+  )) 
+
+
+# Eliminar columnas no necesarias
+data <- data %>%
+  select(-c(response_m_p, nodal_status_pre,estado_del_ultimo_control_julio, her2, er, pr,histology ))
+
+
+
+# Agrupar las columnas sugeridas
+data <- data %>%
+  mutate(
+    ihc_subtype = case_when(
+      ihc_subtype %in% c("LUMINAL A", "LUMINAL B") ~ "Luminal",
+      ihc_subtype %in% c("HER2", "HER2-ENRICHED") ~ "HER2",
+      ihc_subtype %in% c("TRIPLE NEGATIVE", "TRIPLE NEGATIVO") ~ "Triple Negative"
+    ),
+    pam50subtype = case_when(
+      pam50subtype %in% c("Luminal A", "LUMINAL A", "Luminal B", "LUMINAL B") ~ "Luminal",
+      pam50subtype %in% c("HER2 ENRICHED") ~ "HER2-Enriched",
+      pam50subtype %in% c("Basal LIKE", "BASAL LIKE") ~ "Basal",
+      TRUE ~ "OTROS"
+    ),
+    typeof_hormonal_therapy = case_when(
+      typeof_hormonal_therapy %in% c("N", "NO") ~ "NO",
+      TRUE ~ "SI"
+  ))
+
+# Imputar valores faltantes con la moda
+imputar_moda <- function(column) {
+  # Verificar si la columna es categórica (factor o carácter)
+  if (is.factor(column) || is.character(column)) {
+    # Calcular la moda
+    moda <- names(which.max(table(column, useNA = "no")))
+    # Imputar la moda solo en valores faltantes
+    column[is.na(column)] <- moda
+  }
+  return(column)
+}
+
+
+
+# Aplicar imputar_moda a variables categóricas del dataset
+data <- data %>%
+  mutate(across(where(~ is.factor(.) || is.character(.)), imputar_moda))
+
+
+
+#head(data)
+```
+
+
+
+```{r analisis-univariante, echo=TRUE, message=FALSE, warning=FALSE}
+# Cargar librerías necesarias
+library(ggplot2)
+
+# Crear la función de análisis univariante
+analisis_univariante <- function(data) {
+  # Crear el directorio "img" si no existe
+  if (!dir.exists("img")) {
+    dir.create("img")
+  }
+  
+  for (col in colnames(data)) {
+    cat("\n----------------------------------------\n")
+    cat("Análisis de la variable:", col, "\n")
+    cat("----------------------------------------\n")
+    
+    # Si la columna es numérica
+    if (is.numeric(data[[col]])) {
+      resumen <- summary(data[[col]])
+      cat("Estadísticos descriptivos:\n")
+      print(resumen)
+      
+      # Gráfico: Diagrama de cajas y bigotes
+      p <- ggplot(data, aes(y = !!sym(col))) +
+        geom_boxplot(fill = "lightblue", color = "darkblue") +
+        theme_light() +
+        labs(title = paste("Boxplot de", col), y = col) +
+        theme(axis.title.x = element_blank())
+      
+      # Guardar el gráfico en el directorio "img"
+      ggsave(filename = paste0("img/boxplot_", col, ".png"), plot = p)
+    } 
+    # Si la columna es categórica
+    else if (is.factor(data[[col]]) || is.character(data[[col]])) {
+      freqs <- table(data[[col]], useNA = "ifany") # Frecuencias con NA
+      props <- prop.table(freqs) * 100            # Porcentajes
+      cat("Frecuencias absolutas:\n")
+      print(freqs)
+      cat("Frecuencias relativas (%):\n")
+      print(round(props, 2))
+      
+      # Gráfico: Barras
+      p <- ggplot(data, aes(x = !!sym(col))) +
+        geom_bar(fill = "lightgreen", color = "darkgreen") +
+        theme_light() +
+        labs(title = paste("Gráfico de barras de", col), x = col, y = "Frecuencia") +
+        theme(axis.text.x = element_text(angle = 45, hjust = 1))
+      
+      # Guardar el gráfico en el directorio "img"
+      ggsave(filename = paste0("img/barplot_", col, ".png"), plot = p)
+    } 
+    # Si no entra en ninguna de las categorías
+    else {
+      cat("Tipo de variable no reconocido\n")
+    }
+  }
+}
+
+# Llamar a la función con el dataset
+analisis_univariante(data)
+
+```
+
+
+
+```{r analisis-bivariante-corregido, echo=TRUE, message=FALSE, warning=FALSE}
+# Cargar librerías necesarias
+library(DescTools)  # Para calcular V de Cramer
+library(vcd)  # Para gráficos de mosaico
+
+# Función para calcular Chi-cuadrado y V de Cramer
+analisis_bivariante_vcramer <- function(data, variable_interes) {
+  # Crear un dataframe vacío para almacenar resultados
+  resultados <- data.frame(
+    variable = character(),
+    chi_p_value = numeric(),
+    cramer_value = numeric()
+  )
+  
+  # Recorrer todas las columnas excepto la variable de interés
+  for (col in colnames(data)) {
+    if (col != variable_interes) {
+      # Crear tabla de contingencia
+      tabla <- table(data[[col]], data[[variable_interes]])
+      
+      # Calcular Chi-cuadrado
+      chi_test <- chisq.test(tabla, simulate.p.value = TRUE)
+      
+      # Calcular V de Cramer
+      v_cramer <- CramerV(tabla, simulate.p.value = TRUE)
+      
+      # Almacenar los resultados
+      resultados <- rbind(resultados, data.frame(
+        variable = col,
+        chi_p_value = chi_test$p.value,
+        cramer_value = round(v_cramer, 3)
+      ))
+    }
+  }
+  
+  # Ordenar por chi_p_value
+  resultados <- resultados %>% arrange(chi_p_value)
+  
+  # Retornar el dataframe ordenado
+  return(resultados)
+}
+
+# Excluir la columna `tsg` del dataset antes de ejecutar la función
+data_sin_tsg <- data %>% select(-tsg) %>%
+  mutate(
+    SG = as.factor(SG),
+    recidiva = as.factor(recidiva)
+  )
+
+# Ejecutar la función con el dataset modificado
+resultados_bivariante <- analisis_bivariante_vcramer(data_sin_tsg, "SG")
+
+
+
+
+ggplot(data, aes(x = data_sin_tsg$recidiva, fill = data_sin_tsg$SG)) +
+  geom_bar(position = "fill") +
+  theme_minimal() +
+  labs(
+    title = "Distribución de SG según Recidiva",
+    x = "Recidiva",
+    y = "Proporción",
+    fill = "SG"
+  )
+
+
+
+
+mosaicplot(
+  table(data$lymph_nodes_resected_cat, data$SG), 
+  main = "Mosaic Plot: Lymph Nodes Resected vs SG", 
+  xlab = "Lymph Nodes Resected Category", 
+  ylab = "SG", 
+  color = TRUE
+)
+
+
+```
+
+
+
+```{r survival-global, echo=TRUE, message=FALSE, warning=FALSE}
+# Cargar librerías necesarias
+library(survival)  # Para análisis de supervivencia
+library(survminer) # Para visualización de curvas de Kaplan-Meier
+
+# Crear objeto de supervivencia
+surv_object <- Surv(time = data$tsg, event = data$SG)
+
+# Ajustar modelo Kaplan-Meier
+km_fit <- survfit(surv_object ~ 1, data = data)
+
+# Visualizar la curva de supervivencia global
+ggsurvplot(
+  km_fit,
+  data = data,
+  title = "Curva de Supervivencia Global (SG)",
+  xlab = "Tiempo (años)",
+  ylab = "Probabilidad de Supervivencia",
+  surv.scale = "percent",
+  risk.table = TRUE, # Mostrar tabla de riesgo
+  ggtheme = theme_minimal()
+)
+
+```
+
+```{r survival-recidiva, echo=TRUE, message=FALSE, warning=FALSE}
+
+# Ajustar modelo Kaplan-Meier por grupos de 'recidiva'
+km_fit_recidiva <- survfit(surv_object ~ recidiva, data = data)
+
+# Prueba de Log-Rank para comparar curvas
+logrank_test <- survdiff(surv_object ~ recidiva, data = data)
+cat("Prueba Log-Rank entre grupos de recidiva:\n")
+print(logrank_test)
+
+# Visualizar curvas de supervivencia
+ggsurvplot(
+  km_fit_recidiva,
+  data = data,
+  pval = TRUE, # Mostrar el valor p del Log-Rank
+  title = "Curvas de Supervivencia según Recidiva",
+  xlab = "Tiempo (años)",
+  ylab = "Probabilidad de Supervivencia",
+  risk.table = TRUE, # Mostrar tabla de riesgo
+  legend.labs = c("NO Recidiva", "SI Recidiva"),
+  ggtheme = theme_minimal()
+)
+
+```
+```{r lymph_nodes_resected_ca, echo=TRUE, message=FALSE, warning=FALSE}
+data$lymph_nodes_resected_cat <- as.character(data$lymph_nodes_resected_cat)
+
+# Ajustar modelo Kaplan-Meier por grupos de 'lymph_nodes_resected_cat'
+km_fit_lymph_nodes <- survfit(surv_object ~ lymph_nodes_resected_cat, data = data)
+
+# Prueba de Log-Rank para comparar curvas
+logrank_test <- survdiff(surv_object ~ lymph_nodes_resected_cat, data = data)
+cat("Prueba Log-Rank entre grupos de lymph_nodes_resected_cat:\n")
+print(logrank_test)
+
+# Visualizar curvas de supervivencia
+ggsurvplot(
+  km_fit_lymph_nodes,
+  data = data,
+  pval = TRUE, # Mostrar el valor p del Log-Rank
+  title = "Curvas de Supervivencia según Ganglios Linfáticos Extirpados",
+  xlab = "Tiempo (años)",
+  ylab = "Probabilidad de Supervivencia",
+  risk.table = TRUE, # Mostrar tabla de riesgo
+  legend.labs = levels(data$lymph_nodes_resected_cat),
+  ggtheme = theme_minimal()
+)
+```
+
+```{r survival-positive-nodes, echo=TRUE, message=FALSE, warning=FALSE}
+
+data$positive_lymph_nodes_cat <- as.character(data$positive_lymph_nodes_cat)
+
+# Ajustar modelo Kaplan-Meier por grupos de 'positive_lymph_nodes_cat'
+km_fit_positive_nodes <- survfit(surv_object ~ positive_lymph_nodes_cat, data = data)
+
+# Prueba de Log-Rank para comparar curvas
+logrank_test <- survdiff(surv_object ~ positive_lymph_nodes_cat, data = data)
+cat("Prueba Log-Rank entre grupos de positive_lymph_nodes_cat:\n")
+print(logrank_test)
+
+# Visualizar curvas de supervivencia
+ggsurvplot(
+  km_fit_positive_nodes,
+  data = data,
+  pval = TRUE, # Mostrar el valor p del Log-Rank
+  title = "Curvas de Supervivencia según Ganglios Linfáticos Positivos",
+  xlab = "Tiempo (años)",
+  ylab = "Probabilidad de Supervivencia",
+  risk.table = TRUE, # Mostrar tabla de riesgo
+  legend.labs = levels(data$positive_lymph_nodes_cat),
+  ggtheme = theme_minimal()
+)
+
+```
+
+
+
+```{r survival-surgery, echo=TRUE, message=FALSE, warning=FALSE}
+
+# Ajustar modelo Kaplan-Meier por grupos de 'typeof_surgery'
+km_fit_surgery <- survfit(surv_object ~ typeof_surgery, data = data)
+
+# Prueba de Log-Rank para comparar curvas
+logrank_test <- survdiff(surv_object ~ typeof_surgery, data = data)
+cat("Prueba Log-Rank entre grupos de typeof_surgery:\n")
+print(logrank_test)
+
+# Visualizar curvas de supervivencia
+ggsurvplot(
+  km_fit_surgery,
+  data = data,
+  pval = TRUE, # Mostrar el valor p del Log-Rank
+  title = "Curvas de Supervivencia según Tipo de Cirugía",
+  xlab = "Tiempo (años)",
+  ylab = "Probabilidad de Supervivencia",
+  risk.table = TRUE, # Mostrar tabla de riesgo
+  legend.labs = c("Conservadora", "Radical"),
+  ggtheme = theme_minimal()
+)
+
+```
+
+
+
+```{r survival-luminal, echo=TRUE, message=FALSE, warning=FALSE}
+# Filtrar pacientes "Luminal"
+data_luminal <- data %>% filter(ihc_subtype == "Luminal")
+
+# Crear objeto de supervivencia
+surv_object <- Surv(time = data_luminal$tsg, event = data_luminal$SG)
+
+# Curva de supervivencia global
+km_fit <- survfit(surv_object ~ 1, data = data_luminal)
+ggsurvplot(
+  km_fit,
+  data = data_luminal,
+  title = "Supervivencia Global - Luminal",
+  xlab = "Tiempo (años)",
+  ylab = "Probabilidad de Supervivencia",
+  surv.scale = "percent",
+  risk.table = TRUE,
+  ggtheme = theme_minimal()
+)
+
+# Comparación por Recidiva
+km_fit_recidiva <- survfit(surv_object ~ recidiva, data = data_luminal)
+ggsurvplot(
+  km_fit_recidiva,
+  data = data_luminal,
+  pval = TRUE,
+  title = "Recidiva - Luminal",
+  xlab = "Tiempo (años)",
+  ylab = "Probabilidad de Supervivencia",
+  risk.table = TRUE,
+  ggtheme = theme_minimal()
+)
+
+# Comparación por Ganglios Extirpados
+km_fit_lymph_nodes <- survfit(surv_object ~ lymph_nodes_resected_cat, data = data_luminal)
+ggsurvplot(
+  km_fit_lymph_nodes,
+  data = data_luminal,
+  pval = TRUE,
+  title = "Ganglios Linfáticos Extirpados - Luminal",
+  xlab = "Tiempo (años)",
+  ylab = "Probabilidad de Supervivencia",
+  risk.table = TRUE,
+  ggtheme = theme_minimal()
+)
+
+# Comparación por Tipo de Cirugía
+km_fit_surgery <- survfit(surv_object ~ typeof_surgery, data = data_luminal)
+ggsurvplot(
+  km_fit_surgery,
+  data = data_luminal,
+  pval = TRUE,
+  title = "Tipo de Cirugía - Luminal",
+  xlab = "Tiempo (años)",
+  ylab = "Probabilidad de Supervivencia",
+  risk.table = TRUE,
+  ggtheme = theme_minimal()
+)
+```
+
+
+
+```{r survival-her2, echo=TRUE, message=FALSE, warning=FALSE}
+# Filtrar pacientes "HER2"
+data_her2 <- data %>% filter(ihc_subtype == "HER2")
+
+# Crear objeto de supervivencia
+surv_object <- Surv(time = data_her2$tsg, event = data_her2$SG)
+
+# Curva de supervivencia global
+km_fit <- survfit(surv_object ~ 1, data = data_her2)
+ggsurvplot(
+  km_fit,
+  data = data_her2,
+  title = "Supervivencia Global - HER2",
+  xlab = "Tiempo (años)",
+  ylab = "Probabilidad de Supervivencia",
+  surv.scale = "percent",
+  risk.table = TRUE,
+  ggtheme = theme_minimal()
+)
+
+# Comparación por Recidiva
+km_fit_recidiva <- survfit(surv_object ~ recidiva, data = data_her2)
+ggsurvplot(
+  km_fit_recidiva,
+  data = data_her2,
+  pval = TRUE,
+  title = "Recidiva - HER2",
+  xlab = "Tiempo (años)",
+  ylab = "Probabilidad de Supervivencia",
+  risk.table = TRUE,
+  ggtheme = theme_minimal()
+)
+
+# Comparación por Ganglios Extirpados
+km_fit_lymph_nodes <- survfit(surv_object ~ lymph_nodes_resected_cat, data = data_her2)
+ggsurvplot(
+  km_fit_lymph_nodes,
+  data = data_her2,
+  pval = TRUE,
+  title = "Ganglios Linfáticos Extirpados - HER2",
+  xlab = "Tiempo (años)",
+  ylab = "Probabilidad de Supervivencia",
+  risk.table = TRUE,
+  ggtheme = theme_minimal()
+)
+
+# Comparación por Tipo de Cirugía
+km_fit_surgery <- survfit(surv_object ~ typeof_surgery, data = data_her2)
+ggsurvplot(
+  km_fit_surgery,
+  data = data_her2,
+  pval = TRUE,
+  title = "Tipo de Cirugía - HER2",
+  xlab = "Tiempo (años)",
+  ylab = "Probabilidad de Supervivencia",
+  risk.table = TRUE,
+  ggtheme = theme_minimal()
+)
+```
+
+
+
+```{r survival-triple-negative, echo=TRUE, message=FALSE, warning=FALSE}
+# Filtrar pacientes "Triple Negative"
+data_triple_negative <- data %>% filter(ihc_subtype == "Triple Negative")
+
+# Crear objeto de supervivencia
+surv_object <- Surv(time = data_triple_negative$tsg, event = data_triple_negative$SG)
+
+# Curva de supervivencia global
+km_fit <- survfit(surv_object ~ 1, data = data_triple_negative)
+ggsurvplot(
+  km_fit,
+  data = data_triple_negative,
+  title = "Supervivencia Global - Triple Negative",
+  xlab = "Tiempo (años)",
+  ylab = "Probabilidad de Supervivencia",
+  surv.scale = "percent",
+  risk.table = TRUE,
+  ggtheme = theme_minimal()
+)
+
+# Comparación por Recidiva
+km_fit_recidiva <- survfit(surv_object ~ recidiva, data = data_triple_negative)
+ggsurvplot(
+  km_fit_recidiva,
+  data = data_triple_negative,
+  pval = TRUE,
+  title = "Recidiva - Triple Negative",
+  xlab = "Tiempo (años)",
+  ylab = "Probabilidad de Supervivencia",
+  risk.table = TRUE,
+  ggtheme = theme_minimal()
+)
+
+# Comparación por Ganglios Extirpados
+km_fit_lymph_nodes <- survfit(surv_object ~ lymph_nodes_resected_cat, data = data_triple_negative)
+ggsurvplot(
+  km_fit_lymph_nodes,
+  data = data_triple_negative,
+  pval = TRUE,
+  title = "Ganglios Linfáticos Extirpados - Triple Negative",
+  xlab = "Tiempo (años)",
+  ylab = "Probabilidad de Supervivencia",
+  risk.table = TRUE,
+  ggtheme = theme_minimal()
+)
+
+# Comparación por Tipo de Cirugía
+km_fit_surgery <- survfit(surv_object ~ typeof_surgery, data = data_triple_negative)
+ggsurvplot(
+  km_fit_surgery,
+  data = data_triple_negative,
+  pval = TRUE,
+  title = "Tipo de Cirugía - Triple Negative",
+  xlab = "Tiempo (años)",
+  ylab = "Probabilidad de Supervivencia",
+  risk.table = TRUE,
+  ggtheme = theme_minimal()
+)
+```
